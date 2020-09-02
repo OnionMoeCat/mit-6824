@@ -176,13 +176,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.role = Follower
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
+		rf.lastReceived = time.Now()
 	} else if rf.votedFor == -1 || args.CandidateId == rf.votedFor {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
+		rf.lastReceived = time.Now()
 	} else {
 		reply.VoteGranted = false
 	}
-	rf.lastReceived = time.Now()
 }
 
 func GenerateTimeout() time.Duration {
@@ -239,13 +240,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.role = Follower
 		rf.votedFor = -1
 		reply.Success = true
+		rf.lastReceived = time.Now()
 	} else if rf.role == Candidate {
 		rf.role = Follower
 		reply.Success = true
+		rf.lastReceived = time.Now()
 	} else {
 		reply.Success = true
+		rf.lastReceived = time.Now()
 	}
-	rf.lastReceived = time.Now()
 }
 
 //
