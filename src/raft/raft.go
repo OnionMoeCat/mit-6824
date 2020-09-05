@@ -45,8 +45,9 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
-type LogEntry struct {
-	id int
+type Log struct {
+	command interface{}
+	term int
 }
 
 type Role string
@@ -67,13 +68,20 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
-
+	// persistent
 	currentTerm int
 	votedFor int
+	logs []Log
+
+	// volatile
 	role Role
 	lastReceived time.Time
+	commitIndex int
+	lastApplied int
 
-	
+	// volatile leader
+	nextIndex []int
+	matchIndex []int
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -266,13 +274,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
-	// Your code here (2B).
-
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	isLeader := rf.role == Leader
+	index := len(rf.logs)
+	term := rf.currentTerm
+	if !isLeader {
+		return index, term, isLeader
+	}
+	rf.logs = append(rf.logs, Log{term: term, command: command})
 	return index, term, isLeader
 }
 
@@ -410,6 +420,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = Follower
 	rf.votedFor = -1
 	rf.currentTerm = 0
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.logs = append(rf.logs, Log{term: 0})
 	rf.mu.Unlock()
 
 	// Your initialization code here (2A, 2B, 2C).
