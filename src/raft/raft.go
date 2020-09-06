@@ -73,6 +73,8 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
+	cond *sync.Cond
+
 	// persistent
 	currentTerm int
 	votedFor int
@@ -91,6 +93,7 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	applyCh chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -292,6 +295,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = new_commit_index
+		rf.cond.Broadcast()
 	}
 	return
 }
@@ -407,6 +411,7 @@ func (rf *Raft) LeaderFunc() {
 							}
 							if count > len(rf.peers) / 2 {
 								rf.commitIndex = n
+								rf.cond.Broadcast()
 								break
 							}
 						}
@@ -418,6 +423,29 @@ func (rf *Raft) LeaderFunc() {
 		}
 		time.Sleep(heartbeatTimeout)
 	}
+}
+
+func (rf *Raft) ApplyMsgFunc() {
+	for {
+		rf.mu.Lock()
+		if rf.killed() {
+			rf.mu.Unlock()
+			return
+		}
+		for ; rf.lastApplied >= rf.commitIndex; {
+			rf.cond.Wait()
+		}
+		applyMsgs := make([]ApplyMsg, rf.commitIndex - rf.lastApplied)
+		for i := 0; i + rf.lastApplied + 1 <= rf.commitIndex; i ++ {
+			applyMsgs[i] = ApplyMsg{CommandValid: true, Command: rf.logs[i + rf.lastApplied + 1].Command, CommandIndex: i + rf.lastApplied + 1}
+		}
+		rf.mu.Unlock()
+		for i := 0; i < len(applyMsgs); i ++ {
+			rf.applyCh <- applyMsgs[i]
+			rf.lastApplied ++
+		}
+	}
+	
 }
 
 func (rf *Raft) LeaderElection() {
@@ -502,6 +530,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.logs = append(rf.logs, Log{Term: 0})
+	rf.cond = sync.NewCond(&rf.mu)
+	rf.applyCh = applyCh
 	rf.mu.Unlock()
 
 	// Your initialization code here (2A, 2B, 2C).
@@ -509,6 +539,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	go rf.LeaderElection()
+	go rf.ApplyMsgFunc()
 
 	return rf
 }
