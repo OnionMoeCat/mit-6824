@@ -398,6 +398,18 @@ func (rf *Raft) LeaderFunc() {
 					if reply.Success {
 						rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
 						rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)	
+						for n := rf.matchIndex[server]; n > rf.commitIndex && rf.logs[n].Term == rf.currentTerm ; n -- {
+							count := 1
+							for j := 0; j < len(rf.peers); j ++ {
+								if j != rf.me && rf.matchIndex[j] >= n{
+									count += 1
+								}
+							}
+							if count > len(rf.peers) / 2 {
+								rf.commitIndex = n
+								break
+							}
+						}
 					} else {
 						rf.nextIndex[server] --
 					}
