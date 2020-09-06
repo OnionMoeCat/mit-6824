@@ -26,7 +26,12 @@ import "math/rand"
 // import "bytes"
 // import "../labgob"
 
-
+func min(a, b int) int {
+    if a < b {
+        return a
+    }
+    return b
+}
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -46,8 +51,8 @@ type ApplyMsg struct {
 }
 
 type Log struct {
-	command interface{}
-	term int
+	Command interface{}
+	Term int
 }
 
 type Role string
@@ -162,6 +167,10 @@ type RequestVoteReply struct {
 type AppendEntriesArgs struct {
 	// Your data here (2A).
 	Term int
+	PrevLogIndex int
+	PrevLogTerm int
+	Entries []Log
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
@@ -195,7 +204,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func GenerateTimeout() time.Duration {
-	return time.Duration(time.Duration(rand.Intn(200) + 300)* time.Millisecond)
+	return time.Duration(time.Duration(rand.Intn(500) + 500)* time.Millisecond)
 }
 
 //
@@ -241,22 +250,50 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
+	// 1. return false if term is older, not from real leader
 	if args.Term < rf.currentTerm {
 		reply.Success = false
-	} else if args.Term > rf.currentTerm {
+		return
+	}
+	// from this point the leader is real, so we update the last received time
+	rf.lastReceived = time.Now()
+	// update the term if the leader is newer
+	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.role = Follower
 		rf.votedFor = -1
-		reply.Success = true
-		rf.lastReceived = time.Now()
-	} else if rf.role == Candidate {
-		rf.role = Follower
-		reply.Success = true
-		rf.lastReceived = time.Now()
-	} else {
-		reply.Success = true
-		rf.lastReceived = time.Now()
 	}
+	// candidate -> follower
+	if rf.role == Candidate {
+		rf.role = Follower
+	}
+	// 2. return false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
+	if len(rf.logs) <= args.PrevLogIndex || rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.Success = false
+		return
+	}
+	// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
+	reply.Success = true
+	args_i := 0
+	rf_i := args.PrevLogIndex + 1 
+	for ; rf_i < len(rf.logs) && args_i < len(args.Entries); args_i, rf_i = args_i + 1, rf_i + 1 {
+		if rf.logs[rf_i].Term != args.Entries[args_i].Term {
+			rf.logs = rf.logs[:rf_i]
+			break
+		}
+	}
+	// 4. Append any new entries not already in the log
+	new_commit_index := args.LeaderCommit
+	// this means leader's log is longer, so we have new entries to append, otherwise there is no entries to append
+	if args_i < len(args.Entries) {
+		rf.logs = append(rf.logs, args.Entries[args_i:]...)
+		new_commit_index = min(new_commit_index, len(rf.logs) - 1)
+	}
+	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = new_commit_index
+	}
+	return
 }
 
 //
@@ -282,7 +319,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if !isLeader {
 		return index, term, isLeader
 	}
-	rf.logs = append(rf.logs, Log{term: term, command: command})
+	rf.logs = append(rf.logs, Log{Term: term, Command: command})
 	return index, term, isLeader
 }
 
@@ -307,7 +344,27 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+// this function is called within lock
+func (rf *Raft) makeAppendEntriesArgs(i int) AppendEntriesArgs {
+	args := AppendEntriesArgs{}
+	args.Term = rf.currentTerm
+	args.PrevLogIndex = rf.nextIndex[i] - 1
+	args.LeaderCommit = rf.commitIndex
+	log_entries := rf.logs[rf.nextIndex[i]:]
+	args.Entries = make([]Log, len(log_entries)) 
+	copy(args.Entries, log_entries)
+	return args
+}
+
 func (rf *Raft) LeaderFunc() {
+	rf.mu.Lock()
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+	for i, _ := range rf.peers {
+		rf.nextIndex[i] = len(rf.logs)
+		rf.matchIndex[i] = len(rf.logs)
+	}
+	rf.mu.Unlock()
 	heartbeatTimeout := time.Duration(125 * time.Millisecond)
 	for {
 		rf.mu.Lock()
@@ -316,24 +373,35 @@ func (rf *Raft) LeaderFunc() {
 			return
 		}
 		rf.mu.Unlock()
-		args := AppendEntriesArgs{rf.currentTerm}
 		for i, _ := range rf.peers {
 			if i != rf.me {
-				go func(server int) {
+				rpc_args := rf.makeAppendEntriesArgs(i)
+				go func(server int, args AppendEntriesArgs ) {
 					reply := AppendEntriesReply{}
 					ok := rf.sendAppendEntries(server, &args, &reply)
+					rf.mu.Lock()
+					defer rf.mu.Unlock()
 					if !ok {
 						return 
 					}
-					rf.mu.Lock()
-					defer rf.mu.Unlock()
-					rf.lastReceived = time.Now()
+					// always update the current term if reply is ahead
 					if reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
 						rf.votedFor = -1
 						rf.role = Follower
+						return
 					}
-				}(i)
+					// only update when it is still a leader on current term
+					if rf.role != Leader || rf.currentTerm != args.Term {
+						return
+					}
+					if reply.Success {
+						rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
+						rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)	
+					} else {
+						rf.nextIndex[server] --
+					}
+				}(i, rpc_args)
 			}
 		}
 		time.Sleep(heartbeatTimeout)
@@ -376,7 +444,6 @@ func (rf *Raft) KickOffElection() {
 				}
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				rf.lastReceived = time.Now()
 				if rf.role != Candidate || rf.currentTerm != args.Term {
 					return
 				}
@@ -422,7 +489,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.commitIndex = 0
 	rf.lastApplied = 0
-	rf.logs = append(rf.logs, Log{term: 0})
+	rf.logs = append(rf.logs, Log{Term: 0})
 	rf.mu.Unlock()
 
 	// Your initialization code here (2A, 2B, 2C).
