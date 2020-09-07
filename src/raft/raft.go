@@ -184,6 +184,8 @@ type AppendEntriesReply struct {
 	// Your data here (2A).
 	Term int
 	Success bool
+	ConflictIndex int 
+	ConflictTerm int
 }
 
 //
@@ -282,6 +284,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	// 2. return false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
 	if len(rf.logs) <= args.PrevLogIndex || rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+		// If a follower does not have prevLogIndex in its log, it should return with conflictIndex = len(log) and conflictTerm = None.
+		if len(rf.logs) <= args.PrevLogIndex {
+			reply.ConflictIndex = len(rf.logs)
+			reply.ConflictTerm = -1
+		} else {
+		// If a follower does have prevLogIndex in its log, but the term does not match, it should return conflictTerm = log[prevLogIndex].Term, and then search its log for the first index whose entry has term equal to conflictTerm.
+			reply.ConflictTerm = rf.logs[args.PrevLogIndex].Term
+			firstIndex := args.PrevLogIndex
+			for ; firstIndex >= 0 && rf.logs[firstIndex].Term == reply.ConflictTerm; firstIndex -- {
+			}
+			reply.ConflictIndex = firstIndex + 1
+		}
 		reply.Success = false
 		DPrintf("%v, %v end of AppendEntries  time make %v time send %v\n", time.Now(), rf.me,  args.TimeMake, args.TimeSend)
 		return
@@ -434,7 +448,22 @@ func (rf *Raft) LeaderFunc() {
 							}
 						}
 					} else {
-						rf.nextIndex[server] --
+						// Upon receiving a conflict response, the leader should first search its log for conflictTerm. 
+						// If it finds an entry in its log with that term, it should set nextIndex to be the one beyond the index of the last entry in that term in its log.
+						// If it does not find an entry with that term, it should set nextIndex = conflictIndex.
+						if (reply.ConflictTerm == -1) {
+							rf.nextIndex[server] = reply.ConflictIndex
+						} else {
+							lastEntryTerm := rf.nextIndex[server] - 1
+							for ;lastEntryTerm >= 0 && rf.logs[lastEntryTerm].Term > reply.ConflictTerm; lastEntryTerm -- {
+
+							}
+							if rf.logs[lastEntryTerm].Term == reply.ConflictTerm {
+								rf.nextIndex[server] = lastEntryTerm + 1
+							} else {
+								rf.nextIndex[server] = reply.ConflictIndex
+							}
+						}
 					}
 				}(i, rpc_args)
 			}
