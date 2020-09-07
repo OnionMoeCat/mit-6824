@@ -236,6 +236,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else {
 		reply.VoteGranted = false
 	}
+	rf.persist()
 }
 
 func GenerateTimeout() time.Duration {
@@ -290,6 +291,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 1. return false if term is older, not from real leader
 	if args.Term < rf.currentTerm {
 		reply.Success = false
+		rf.persist()
 		DPrintf("%v, %v end of AppendEntries  time make %v time send %v\n", time.Now(), rf.me,  args.TimeMake, args.TimeSend)
 		return
 	}
@@ -320,6 +322,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.ConflictIndex = firstIndex + 1
 		}
 		reply.Success = false
+		rf.persist()
 		DPrintf("%v, %v end of AppendEntries  time make %v time send %v\n", time.Now(), rf.me,  args.TimeMake, args.TimeSend)
 		return
 	}
@@ -346,6 +349,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf("%v, %v commitIndex advance to %v  time make %v time send %v\n", time.Now(), rf.me, rf.commitIndex, args.TimeMake, args.TimeSend)
 		rf.cond.Broadcast()
 	}
+	rf.persist()
 	DPrintf("%v, %v end of AppendEntries time make %v time send %v\n", time.Now(), rf.me, args.TimeMake, args.TimeSend)
 	return
 }
@@ -428,6 +432,8 @@ func (rf *Raft) LeaderFunc() {
 			rf.mu.Unlock()
 			return
 		}
+		// persist before sending out RPC
+		rf.persist()
 		for i, _ := range rf.peers {
 			if i != rf.me {
 				rpc_args := rf.makeAppendEntriesArgs(i)
@@ -547,6 +553,8 @@ func (rf *Raft) KickOffElection() {
 	args := RequestVoteArgs{rf.currentTerm, rf.me, lastLogIndex, rf.logs[lastLogIndex].Term}
 	numVote := 1
 	done := false
+	// persist before sending out RPC
+	rf.persist()
 	rf.mu.Unlock()
 	for i, _ := range rf.peers {
 		if i != rf.me {
@@ -565,6 +573,7 @@ func (rf *Raft) KickOffElection() {
 					rf.currentTerm = reply.Term
 					rf.role = Follower
 					rf.votedFor = -1
+					// TODO: persist
 				}
 				if reply.VoteGranted {
 					numVote ++
